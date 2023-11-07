@@ -136,6 +136,10 @@ int32_t fmGetFuncExecFuncs(int32_t funcId, SFuncExecFuncs* pFpSet) {
   if (fmIsUserDefinedFunc(funcId) || funcId < 0 || funcId >= funcMgtBuiltinsNum) {
     return TSDB_CODE_FAILED;
   }
+  if (!funcMgtBuiltins[funcId].initFunc) {
+    qError("fmGetFuncExecFuncs initFunc empty");
+    return TSDB_CODE_FAILED;
+  }
   pFpSet->getEnv = funcMgtBuiltins[funcId].getEnvFunc;
   pFpSet->init = funcMgtBuiltins[funcId].initFunc;
   pFpSet->process = funcMgtBuiltins[funcId].processFunc;

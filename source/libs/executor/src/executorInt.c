@@ -476,6 +476,10 @@ void setResultRowInitCtx(SResultRow* pResult, SqlFunctionCtx* pCtx, int32_t numO
 
     if (!pResInfo->initialized) {
       if (pCtx[i].functionId != -1) {
+        if(!pCtx[i].fpSet.init) {
+          qError("init func is null");
+          continue;
+        }
         pCtx[i].fpSet.init(&pCtx[i], pResInfo);
       } else {
         pResInfo->initialized = true;
