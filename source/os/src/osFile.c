@@ -21,6 +21,7 @@
 #include <io.h>
 #include <WinBase.h>
 #include <ktmw32.h>
+#include <windows.h>
 #define F_OK 0
 #define W_OK 2
 #define R_OK 4
@@ -44,12 +45,22 @@
 
 typedef int32_t FileFd;
 
+#ifdef WINDOWS
 typedef struct TdFile {
   TdThreadRwlock rwlock;
   int            refId;
   FileFd         fd;
-  FILE          *fp;
+  FILE *         fp;
+  HANDLE         hFile;
 } TdFile;
+#else
+typedef struct TdFile {
+  TdThreadRwlock rwlock;
+  int            refId;
+  FileFd         fd;
+  FILE *         fp;
+} TdFile;
+#endif  // WINDOWS
 
 #define FILE_WITH_LOCK 1
 
@@ -282,6 +293,190 @@ int32_t taosDevInoFile(TdFilePtr pFile, int64_t *stDev, int64_t *stIno) {
   return 0;
 }
 
+#ifdef  WINDOWS
+
+TdFilePtr taosOpenFile(const char *path, int32_t tdFileOptions) {
+  DWORD openMode = 0;
+  DWORD access = 0;
+  DWORD  fileFlag = FILE_ATTRIBUTE_NORMAL;
+
+  if (tdFileOptions & TD_FILE_STREAM) {
+    if (tdFileOptions & TD_FILE_APPEND) {
+      openMode = OPEN_ALWAYS;
+      access = GENERIC_READ | FILE_APPEND_DATA;
+    } else if (tdFileOptions & TD_FILE_TRUNC) {
+      openMode = OPEN_ALWAYS;
+      access = GENERIC_READ | GENERIC_WRITE;
+    } else if ((tdFileOptions & TD_FILE_READ) && !(tdFileOptions & TD_FILE_WRITE)) {
+      openMode = OPEN_EXISTING;
+      access = GENERIC_READ;
+    } else {
+      openMode = OPEN_EXISTING;
+      access = GENERIC_READ | GENERIC_WRITE;
+    }
+
+    if (tdFileOptions & TD_FILE_EXCL) {
+      return NULL;
+    }
+  } else {
+    openMode = OPEN_EXISTING;
+    if (tdFileOptions & TD_FILE_CREATE) {
+      openMode = OPEN_ALWAYS;
+    } else if ((tdFileOptions & TD_FILE_EXCL)) {
+      openMode = CREATE_NEW;
+    }
+    if ((tdFileOptions & TD_FILE_APPEND)) {
+      access = FILE_APPEND_DATA;
+    } else if ((tdFileOptions & TD_FILE_TRUNC)) {
+      access = GENERIC_WRITE;
+    } else if (tdFileOptions & TD_FILE_WRITE) {
+      access = GENERIC_WRITE;
+    }
+    if (tdFileOptions & TD_FILE_READ) {
+      access |= GENERIC_READ;
+    }
+  }
+
+  if (tdFileOptions & TD_FILE_AUTO_DEL) {
+    fileFlag = FILE_ATTRIBUTE_TEMPORARY;
+  }
+
+  HANDLE hFile = CreateFile(path, access, 0, NULL, openMode, fileFlag, NULL);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    return NULL;
+  }
+  TdFilePtr pFile = (TdFilePtr)taosMemoryMalloc(sizeof(TdFile));
+  if (pFile == NULL) {
+    CloseHandle(hFile);
+    return NULL;
+  }
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockInit(&(pFile->rwlock), NULL);
+#endif
+  pFile->refId = 0;
+  pFile->hFile = hFile;
+  return pFile;
+}
+
+int32_t taosCloseFile(TdFilePtr *ppFile) {
+  int32_t code = 0;
+  if (ppFile == NULL || *ppFile == NULL) {
+    return 0;
+  }
+#if FILE_WITH_LOCK
+  taosThreadRwlockWrlock(&((*ppFile)->rwlock));
+#endif
+  if ((*ppFile)->hFile != NULL) {
+    CloseHandle((*ppFile)->hFile);
+    (*ppFile)->hFile = NULL;
+  }
+  (*ppFile)->refId = 0;
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&((*ppFile)->rwlock));
+  taosThreadRwlockDestroy(&((*ppFile)->rwlock));
+#endif
+  taosMemoryFree(*ppFile);
+  *ppFile = NULL;
+  return code;
+}
+
+int32_t taosLockFile(TdFilePtr pFile) {
+  if (pFile->hFile == NULL) {
+    return -1;
+  }
+#ifdef WINDOWS
+  BOOL          fSuccess = FALSE;
+  OVERLAPPED    overlapped = {0};
+  HANDLE hFile = pFile->hFile;
+  fSuccess = LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                        0,           // reserved
+                        ~0,          // number of bytes to lock low
+                        ~0,          // number of bytes to lock high
+                        &overlapped  // overlapped structure
+  );
+  if (!fSuccess) {
+    return GetLastError();
+  }
+  return 0;
+#else
+  return (int32_t)flock(pFile->fd, LOCK_EX | LOCK_NB);
+#endif
+}
+
+int32_t taosUnLockFile(TdFilePtr pFile) {
+  if (pFile->hFile == NULL) {
+    return 0;
+  }
+
+  BOOL       fSuccess = FALSE;
+  OVERLAPPED overlapped = {0};
+  HANDLE     hFile = pFile->hFile;
+  fSuccess = UnlockFileEx(hFile, 0, ~0, ~0, &overlapped);
+  if (!fSuccess) {
+    return GetLastError();
+  }
+  return 0;
+}
+
+int64_t taosReadFile(TdFilePtr pFile, void *buf, int64_t count) {
+#if FILE_WITH_LOCK
+  taosThreadRwlockRdlock(&(pFile->rwlock));
+#endif
+  if (pFile->hFile == NULL) {
+#if FILE_WITH_LOCK
+    taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+    return -1;
+  }
+  int64_t leftbytes = count;
+  int64_t readbytes;
+  char *  tbuf = (char *)buf;
+
+   DWORD bytesRead;
+  if (ReadFile(pFile->hFile, buf, count, &bytesRead, NULL)) {
+     count = bytesRead;
+  } else {
+    count = -1;
+  }
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+  return count;
+}
+
+int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
+  if (pFile == NULL || pFile->hFile == NULL) {
+    return 0;
+  }
+#if FILE_WITH_LOCK
+  taosThreadRwlockWrlock(&(pFile->rwlock));
+#endif
+  if (pFile->fd < 0) {
+#if FILE_WITH_LOCK
+    taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+    return 0;
+  }
+
+  HANDLE hFile = pFile->hFile;
+  int64_t res = 0;
+  DWORD bytesWritten;
+  if (!WriteFile(hFile, buf, count, &bytesWritten, NULL)) {
+    res = -1;
+  } else {
+    res = bytesWritten;
+  }
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+  return res;
+}
+
+#else
+
 TdFilePtr taosOpenFile(const char *path, int32_t tdFileOptions) {
   int   fd = -1;
   FILE *fp = NULL;
@@ -394,6 +589,53 @@ int32_t taosCloseFile(TdFilePtr *ppFile) {
   return code;
 }
 
+int32_t taosLockFile(TdFilePtr pFile) {
+  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
+  if (pFile->fd < 0) {
+    return -1;
+  }
+#ifdef WINDOWS
+  BOOL          fSuccess = FALSE;
+  LARGE_INTEGER fileSize;
+  OVERLAPPED    overlapped = {0};
+
+  HANDLE hFile = (HANDLE)_get_osfhandle(pFile->fd);
+
+  fSuccess = LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                        0,           // reserved
+                        ~0,          // number of bytes to lock low
+                        ~0,          // number of bytes to lock high
+                        &overlapped  // overlapped structure
+  );
+  if (!fSuccess) {
+    return GetLastError();
+  }
+  return 0;
+#else
+  return (int32_t)flock(pFile->fd, LOCK_EX | LOCK_NB);
+#endif
+}
+
+int32_t taosUnLockFile(TdFilePtr pFile) {
+  ASSERT(pFile->fd >= 0);
+  if (pFile->fd < 0) {
+    return 0;
+  }
+#ifdef WINDOWS
+  BOOL       fSuccess = FALSE;
+  OVERLAPPED overlapped = {0};
+  HANDLE     hFile = (HANDLE)_get_osfhandle(pFile->fd);
+
+  fSuccess = UnlockFileEx(hFile, 0, ~0, ~0, &overlapped);
+  if (!fSuccess) {
+    return GetLastError();
+  }
+  return 0;
+#else
+  return (int32_t)flock(pFile->fd, LOCK_UN | LOCK_NB);
+#endif
+}
+
 int64_t taosReadFile(TdFilePtr pFile, void *buf, int64_t count) {
 #if FILE_WITH_LOCK
   taosThreadRwlockRdlock(&(pFile->rwlock));
@@ -407,7 +649,7 @@ int64_t taosReadFile(TdFilePtr pFile, void *buf, int64_t count) {
   }
   int64_t leftbytes = count;
   int64_t readbytes;
-  char   *tbuf = (char *)buf;
+  char *  tbuf = (char *)buf;
 
   while (leftbytes > 0) {
 #ifdef WINDOWS
@@ -440,6 +682,58 @@ int64_t taosReadFile(TdFilePtr pFile, void *buf, int64_t count) {
 #endif
   return count;
 }
+
+int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
+  if (pFile == NULL) {
+    return 0;
+  }
+#if FILE_WITH_LOCK
+  taosThreadRwlockWrlock(&(pFile->rwlock));
+#endif
+  if (pFile->fd < 0) {
+#if FILE_WITH_LOCK
+    taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+    return 0;
+  }
+
+  int64_t nleft = count;
+  int64_t nwritten = 0;
+  char *  tbuf = (char *)buf;
+
+#ifdef WINDOWS
+  HANDLE  hFile = pFile->hFile;
+
+  DWORD bytesWritten;
+  if (!WriteFile(hFile, buf, count, &bytesWritten, NULL)) {
+    return -1;
+  }
+#else
+
+  while (nleft > 0) {
+    nwritten = write(pFile->fd, (void *)tbuf, (uint32_t)nleft);
+    if (nwritten < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+#if FILE_WITH_LOCK
+      taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+      return -1;
+    }
+    nleft -= nwritten;
+    tbuf += nwritten;
+  }
+
+#endif
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+  return count;
+}
+
+#endif  //  WINDOWS
 
 int64_t taosPReadFile(TdFilePtr pFile, void *buf, int64_t count, int64_t offset) {
   if (pFile == NULL) {
@@ -475,45 +769,6 @@ int64_t taosPReadFile(TdFilePtr pFile, void *buf, int64_t count, int64_t offset)
   taosThreadRwlockUnlock(&(pFile->rwlock));
 #endif
   return ret;
-}
-
-int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
-  if (pFile == NULL) {
-    return 0;
-  }
-#if FILE_WITH_LOCK
-  taosThreadRwlockWrlock(&(pFile->rwlock));
-#endif
-  if (pFile->fd < 0) {
-#if FILE_WITH_LOCK
-    taosThreadRwlockUnlock(&(pFile->rwlock));
-#endif
-    return 0;
-  }
-
-  int64_t nleft = count;
-  int64_t nwritten = 0;
-  char   *tbuf = (char *)buf;
-
-  while (nleft > 0) {
-    nwritten = write(pFile->fd, (void *)tbuf, (uint32_t)nleft);
-    if (nwritten < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-#if FILE_WITH_LOCK
-      taosThreadRwlockUnlock(&(pFile->rwlock));
-#endif
-      return -1;
-    }
-    nleft -= nwritten;
-    tbuf += nwritten;
-  }
-
-#if FILE_WITH_LOCK
-  taosThreadRwlockUnlock(&(pFile->rwlock));
-#endif
-  return count;
 }
 
 int64_t taosPWriteFile(TdFilePtr pFile, const void *buf, int64_t count, int64_t offset) {
@@ -600,53 +855,6 @@ int32_t taosFStatFile(TdFilePtr pFile, int64_t *size, int32_t *mtime) {
   }
 
   return 0;
-}
-
-int32_t taosLockFile(TdFilePtr pFile) {
-  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
-  if (pFile->fd < 0) {
-    return -1;
-  }
-#ifdef WINDOWS
-  BOOL          fSuccess = FALSE;
-  LARGE_INTEGER fileSize;
-  OVERLAPPED    overlapped = {0};
-
-  HANDLE hFile = (HANDLE)_get_osfhandle(pFile->fd);
-
-  fSuccess = LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                        0,           // reserved
-                        ~0,          // number of bytes to lock low
-                        ~0,          // number of bytes to lock high
-                        &overlapped  // overlapped structure
-  );
-  if (!fSuccess) {
-    return GetLastError();
-  }
-  return 0;
-#else
-  return (int32_t)flock(pFile->fd, LOCK_EX | LOCK_NB);
-#endif
-}
-
-int32_t taosUnLockFile(TdFilePtr pFile) {
-  ASSERT(pFile->fd >= 0);
-  if (pFile->fd < 0) {
-    return 0;
-  }
-#ifdef WINDOWS
-  BOOL       fSuccess = FALSE;
-  OVERLAPPED overlapped = {0};
-  HANDLE     hFile = (HANDLE)_get_osfhandle(pFile->fd);
-
-  fSuccess = UnlockFileEx(hFile, 0, ~0, ~0, &overlapped);
-  if (!fSuccess) {
-    return GetLastError();
-  }
-  return 0;
-#else
-  return (int32_t)flock(pFile->fd, LOCK_UN | LOCK_NB);
-#endif
 }
 
 int32_t taosFtruncateFile(TdFilePtr pFile, int64_t l_size) {
