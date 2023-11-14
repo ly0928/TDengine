@@ -396,6 +396,7 @@ typedef SScanPhysiNode SBlockDistScanPhysiNode;
 typedef struct SLastRowScanPhysiNode {
   SScanPhysiNode scan;
   SNodeList*     pGroupTags;
+  SNodeList*     pLastType;
   bool           groupSort;
   bool           ignoreNull;
   SNodeList*     pTargets;
