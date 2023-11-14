@@ -52,6 +52,7 @@ typedef struct TdFile {
   FileFd         fd;
   FILE *         fp;
   HANDLE         hFile;
+  bool           eof;
 } TdFile;
 #else
 typedef struct TdFile {
@@ -341,7 +342,7 @@ TdFilePtr taosOpenFile(const char *path, int32_t tdFileOptions) {
     fileFlag = FILE_ATTRIBUTE_TEMPORARY;
   }
 
-  HANDLE hFile = CreateFile(path, access, 0, NULL, openMode, fileFlag, NULL);
+  HANDLE hFile = CreateFile(path, access, FILE_SHARE_READ, NULL, openMode, fileFlag, NULL);
   if (hFile == INVALID_HANDLE_VALUE) {
     return NULL;
   }
@@ -356,6 +357,7 @@ TdFilePtr taosOpenFile(const char *path, int32_t tdFileOptions) {
 #endif
   pFile->refId = 0;
   pFile->hFile = hFile;
+  pFile->eof = false;
   return pFile;
 }
 
@@ -368,7 +370,7 @@ int32_t taosCloseFile(TdFilePtr *ppFile) {
   taosThreadRwlockWrlock(&((*ppFile)->rwlock));
 #endif
   if ((*ppFile)->hFile != NULL) {
-    CloseHandle((*ppFile)->hFile);
+    bool ret = CloseHandle((*ppFile)->hFile);
     (*ppFile)->hFile = NULL;
   }
   (*ppFile)->refId = 0;
@@ -453,12 +455,6 @@ int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
 #if FILE_WITH_LOCK
   taosThreadRwlockWrlock(&(pFile->rwlock));
 #endif
-  if (pFile->fd < 0) {
-#if FILE_WITH_LOCK
-    taosThreadRwlockUnlock(&(pFile->rwlock));
-#endif
-    return 0;
-  }
 
   HANDLE hFile = pFile->hFile;
   int64_t res = 0;
@@ -479,11 +475,152 @@ int64_t taosGetsFile(TdFilePtr pFile, int32_t maxSize, char *__restrict buf) {
   if (pFile == NULL || pFile->hFile == NULL) {
     return -1;
   }
-  return taosReadFile(pFile->hFile, buf, maxSize);
+
+  int64_t readbytes;
+  char *  tbuf = (char *)buf;
+
+  DWORD bytesRead;
+  if (ReadFile(pFile->hFile, buf, maxSize, &bytesRead, NULL)) {
+    if (bytesRead == 0) {
+      pFile->eof = true;
+    }
+    return bytesRead;
+  } else {
+    return -1;
+  }
 }
 
 int32_t taosEOFFile(TdFilePtr pFile) {
-  return false;
+  if (pFile == NULL) return true;
+  return pFile->eof;
+}
+
+int32_t taosFStatFile(TdFilePtr pFile, int64_t *size, int32_t *mtime) {
+  if (pFile == NULL) {
+    return 0;
+  }
+  if (pFile->hFile == NULL) {
+    return -1;
+  }
+
+  FILETIME creationTime, lastAccessTime, lastWriteTime;
+  if (!GetFileTime(pFile->hFile, &creationTime, &lastAccessTime, &lastWriteTime)) {
+    return -1;  // Error getting file time
+  }
+
+  LARGE_INTEGER fileSize;
+  if (!GetFileSizeEx(pFile->hFile, &fileSize)) {
+    return -1;  // Error getting file size
+  }
+
+  if (size != NULL) {
+    *size = fileSize.QuadPart;
+  }
+
+  if (mtime != NULL) {
+    // Convert the FILETIME structure to a time_t value
+    ULARGE_INTEGER ull;
+    ull.LowPart = lastWriteTime.dwLowDateTime;
+    ull.HighPart = lastWriteTime.dwHighDateTime;
+    *mtime = (int32_t)((ull.QuadPart - 116444736000000000ULL) / 10000000ULL);
+  }
+
+  return 0;
+}
+
+int32_t taosFsyncFile(TdFilePtr pFile) {
+  return 0;
+}
+
+int32_t taosFtruncateFile(TdFilePtr pFile, int64_t l_size) {
+  if (pFile == NULL) {
+    return 0;
+  }
+  if (pFile->hFile == NULL) {
+    printf("Ftruncate file error, hFile was NULL\n");
+    return -1;
+  }
+
+  HANDLE h = pFile->hFile;
+
+  LARGE_INTEGER li_0;
+  li_0.QuadPart = (int64_t)0;
+  BOOL cur = SetFilePointerEx(h, li_0, NULL, FILE_CURRENT);
+  if (!cur) {
+    printf("SetFilePointerEx Error getting current position in file.\n");
+    return -1;
+  }
+
+  LARGE_INTEGER li_size;
+  li_size.QuadPart = l_size;
+  BOOL cur2 = SetFilePointerEx(h, li_size, NULL, FILE_BEGIN);
+  if (cur2 == 0) {
+    int error = GetLastError();
+    printf("SetFilePointerEx GetLastError is: %d\n", error);
+    switch (error) {
+      case ERROR_INVALID_HANDLE:
+        errno = EBADF;
+        break;
+      default:
+        errno = EIO;
+        break;
+    }
+    return -1;
+  }
+
+  if (!SetEndOfFile(h)) {
+    int error = GetLastError();
+    printf("SetEndOfFile GetLastError is:%d", error);
+    switch (error) {
+      case ERROR_INVALID_HANDLE:
+        errno = EBADF;
+        break;
+      default:
+        errno = EIO;
+        break;
+    }
+    return -1;
+  }
+  return 0;
+}
+
+int64_t taosLSeekFile(TdFilePtr pFile, int64_t offset, int32_t whence) {
+  if (pFile == NULL || pFile->hFile == NULL) {
+    return -1;
+  }
+  DWORD moveMethod;
+  switch (whence) {
+    case SEEK_SET:
+      moveMethod = FILE_BEGIN;
+      break;
+    case SEEK_CUR:
+      moveMethod = FILE_CURRENT;
+      break;
+    case SEEK_END:
+      moveMethod = FILE_END;
+      break;
+    default:
+      return -1;
+  }
+  LARGE_INTEGER liOffset;
+  liOffset.QuadPart = offset;
+  LARGE_INTEGER liNewPos;
+  int64_t       ret;
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockRdlock(&(pFile->rwlock));
+#endif
+
+  if (SetFilePointerEx(pFile->hFile, liOffset, &liNewPos, moveMethod)) {
+    ret = liNewPos.QuadPart;
+  } else {
+    ret = - 1;  // Error
+  }
+
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+  return ret;
 }
 
 #else
@@ -770,6 +907,132 @@ int32_t taosEOFFile(TdFilePtr pFile) {
   return feof(pFile->fp);
 }
 
+int32_t taosFStatFile(TdFilePtr pFile, int64_t *size, int32_t *mtime) {
+  if (pFile == NULL) {
+    return 0;
+  }
+  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
+  if (pFile->fd < 0) {
+    return -1;
+  }
+
+#ifdef WINDOWS
+  struct __stat64 fileStat;
+  int32_t         code = _fstat64(pFile->fd, &fileStat);
+#else
+  struct stat fileStat;
+  int32_t code = fstat(pFile->fd, &fileStat);
+#endif
+  if (code < 0) {
+    return code;
+  }
+
+  if (size != NULL) {
+    *size = fileStat.st_size;
+  }
+
+  if (mtime != NULL) {
+    *mtime = fileStat.st_mtime;
+  }
+
+  return 0;
+}
+
+int32_t taosFsyncFile(TdFilePtr pFile) {
+  if (pFile == NULL) {
+    return 0;
+  }
+
+  // this implementation is WRONG
+  // fflush is not a replacement of fsync
+  if (pFile->fp != NULL) return fflush(pFile->fp);
+  if (pFile->fd >= 0) {
+#ifdef WINDOWS
+    HANDLE h = (HANDLE)_get_osfhandle(pFile->fd);
+    return !FlushFileBuffers(h);
+#else
+    return fsync(pFile->fd);
+#endif
+  }
+  return 0;
+}
+
+int32_t taosFtruncateFile(TdFilePtr pFile, int64_t l_size) {
+  if (pFile == NULL) {
+    return 0;
+  }
+  if (pFile->fd < 0) {
+    printf("Ftruncate file error, fd arg was negative\n");
+    return -1;
+  }
+#ifdef WINDOWS
+
+  HANDLE h = (HANDLE)_get_osfhandle(pFile->fd);
+
+  LARGE_INTEGER li_0;
+  li_0.QuadPart = (int64_t)0;
+  BOOL cur = SetFilePointerEx(h, li_0, NULL, FILE_CURRENT);
+  if (!cur) {
+    printf("SetFilePointerEx Error getting current position in file.\n");
+    return -1;
+  }
+
+  LARGE_INTEGER li_size;
+  li_size.QuadPart = l_size;
+  BOOL cur2 = SetFilePointerEx(h, li_size, NULL, FILE_BEGIN);
+  if (cur2 == 0) {
+    int error = GetLastError();
+    printf("SetFilePointerEx GetLastError is: %d\n", error);
+    switch (error) {
+      case ERROR_INVALID_HANDLE:
+        errno = EBADF;
+        break;
+      default:
+        errno = EIO;
+        break;
+    }
+    return -1;
+  }
+
+  if (!SetEndOfFile(h)) {
+    int error = GetLastError();
+    printf("SetEndOfFile GetLastError is:%d", error);
+    switch (error) {
+      case ERROR_INVALID_HANDLE:
+        errno = EBADF;
+        break;
+      default:
+        errno = EIO;
+        break;
+    }
+    return -1;
+  }
+
+  return 0;
+#else
+  return ftruncate(pFile->fd, l_size);
+#endif
+}
+
+int64_t taosLSeekFile(TdFilePtr pFile, int64_t offset, int32_t whence) {
+  if (pFile == NULL || pFile->fd < 0) {
+    return -1;
+  }
+#if FILE_WITH_LOCK
+  taosThreadRwlockRdlock(&(pFile->rwlock));
+#endif
+  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
+#ifdef WINDOWS
+  int64_t ret = _lseeki64(pFile->fd, offset, whence);
+#else
+  int64_t ret = lseek(pFile->fd, offset, whence);
+#endif
+#if FILE_WITH_LOCK
+  taosThreadRwlockUnlock(&(pFile->rwlock));
+#endif
+  return ret;
+}
+
 #endif  //  WINDOWS
 
 int64_t taosPReadFile(TdFilePtr pFile, void *buf, int64_t count, int64_t offset) {
@@ -842,132 +1105,6 @@ int64_t taosPWriteFile(TdFilePtr pFile, const void *buf, int64_t count, int64_t 
   taosThreadRwlockUnlock(&(pFile->rwlock));
 #endif
   return ret;
-}
-
-int64_t taosLSeekFile(TdFilePtr pFile, int64_t offset, int32_t whence) {
-  if (pFile == NULL || pFile->fd < 0) {
-    return -1;
-  }
-#if FILE_WITH_LOCK
-  taosThreadRwlockRdlock(&(pFile->rwlock));
-#endif
-  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
-#ifdef WINDOWS
-  int64_t ret = _lseeki64(pFile->fd, offset, whence);
-#else
-  int64_t ret = lseek(pFile->fd, offset, whence);
-#endif
-#if FILE_WITH_LOCK
-  taosThreadRwlockUnlock(&(pFile->rwlock));
-#endif
-  return ret;
-}
-
-int32_t taosFStatFile(TdFilePtr pFile, int64_t *size, int32_t *mtime) {
-  if (pFile == NULL) {
-    return 0;
-  }
-  ASSERT(pFile->fd >= 0);  // Please check if you have closed the file.
-  if (pFile->fd < 0) {
-    return -1;
-  }
-
-#ifdef WINDOWS
-  struct __stat64 fileStat;
-  int32_t         code = _fstat64(pFile->fd, &fileStat);
-#else
-  struct stat fileStat;
-  int32_t code = fstat(pFile->fd, &fileStat);
-#endif
-  if (code < 0) {
-    return code;
-  }
-
-  if (size != NULL) {
-    *size = fileStat.st_size;
-  }
-
-  if (mtime != NULL) {
-    *mtime = fileStat.st_mtime;
-  }
-
-  return 0;
-}
-
-int32_t taosFtruncateFile(TdFilePtr pFile, int64_t l_size) {
-  if (pFile == NULL) {
-    return 0;
-  }
-  if (pFile->fd < 0) {
-    printf("Ftruncate file error, fd arg was negative\n");
-    return -1;
-  }
-#ifdef WINDOWS
-
-  HANDLE h = (HANDLE)_get_osfhandle(pFile->fd);
-
-  LARGE_INTEGER li_0;
-  li_0.QuadPart = (int64_t)0;
-  BOOL cur = SetFilePointerEx(h, li_0, NULL, FILE_CURRENT);
-  if (!cur) {
-    printf("SetFilePointerEx Error getting current position in file.\n");
-    return -1;
-  }
-
-  LARGE_INTEGER li_size;
-  li_size.QuadPart = l_size;
-  BOOL cur2 = SetFilePointerEx(h, li_size, NULL, FILE_BEGIN);
-  if (cur2 == 0) {
-    int error = GetLastError();
-    printf("SetFilePointerEx GetLastError is: %d\n", error);
-    switch (error) {
-      case ERROR_INVALID_HANDLE:
-        errno = EBADF;
-        break;
-      default:
-        errno = EIO;
-        break;
-    }
-    return -1;
-  }
-
-  if (!SetEndOfFile(h)) {
-    int error = GetLastError();
-    printf("SetEndOfFile GetLastError is:%d", error);
-    switch (error) {
-      case ERROR_INVALID_HANDLE:
-        errno = EBADF;
-        break;
-      default:
-        errno = EIO;
-        break;
-    }
-    return -1;
-  }
-
-  return 0;
-#else
-  return ftruncate(pFile->fd, l_size);
-#endif
-}
-
-int32_t taosFsyncFile(TdFilePtr pFile) {
-  if (pFile == NULL) {
-    return 0;
-  }
-
-  // this implementation is WRONG
-  // fflush is not a replacement of fsync
-  if (pFile->fp != NULL) return fflush(pFile->fp);
-  if (pFile->fd >= 0) {
-#ifdef WINDOWS
-    HANDLE h = (HANDLE)_get_osfhandle(pFile->fd);
-    return !FlushFileBuffers(h);
-#else
-    return fsync(pFile->fd);
-#endif
-  }
-  return 0;
 }
 
 int64_t taosFSendFile(TdFilePtr pFileOut, TdFilePtr pFileIn, int64_t *offset, int64_t size) {
