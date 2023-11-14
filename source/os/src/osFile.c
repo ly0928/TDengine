@@ -475,6 +475,17 @@ int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
   return res;
 }
 
+int64_t taosGetsFile(TdFilePtr pFile, int32_t maxSize, char *__restrict buf) {
+  if (pFile == NULL || pFile->hFile == NULL) {
+    return -1;
+  }
+  return taosReadFile(pFile->hFile, buf, maxSize);
+}
+
+int32_t taosEOFFile(TdFilePtr pFile) {
+  return false;
+}
+
 #else
 
 TdFilePtr taosOpenFile(const char *path, int32_t tdFileOptions) {
@@ -731,6 +742,32 @@ int64_t taosWriteFile(TdFilePtr pFile, const void *buf, int64_t count) {
   taosThreadRwlockUnlock(&(pFile->rwlock));
 #endif
   return count;
+}
+
+int64_t taosGetsFile(TdFilePtr pFile, int32_t maxSize, char *__restrict buf) {
+  if (pFile == NULL || buf == NULL) {
+    return -1;
+  }
+  ASSERT(pFile->fp != NULL);
+  if (pFile->fp == NULL) {
+    return -1;
+  }
+  if (fgets(buf, maxSize, pFile->fp) == NULL) {
+    return -1;
+  }
+  return strlen(buf);
+}
+
+int32_t taosEOFFile(TdFilePtr pFile) {
+  if (pFile == NULL) {
+    return -1;
+  }
+  ASSERT(pFile->fp != NULL);
+  if (pFile->fp == NULL) {
+    return -1;
+  }
+
+  return feof(pFile->fp);
 }
 
 #endif  //  WINDOWS
@@ -1101,32 +1138,6 @@ int64_t taosGetLineFile(TdFilePtr pFile, char **__restrict ptrBuf) {
   size_t len = 0;
   return getline(ptrBuf, &len, pFile->fp);
 #endif
-}
-
-int64_t taosGetsFile(TdFilePtr pFile, int32_t maxSize, char *__restrict buf) {
-  if (pFile == NULL || buf == NULL) {
-    return -1;
-  }
-  ASSERT(pFile->fp != NULL);
-  if (pFile->fp == NULL) {
-    return -1;
-  }
-  if (fgets(buf, maxSize, pFile->fp) == NULL) {
-    return -1;
-  }
-  return strlen(buf);
-}
-
-int32_t taosEOFFile(TdFilePtr pFile) {
-  if (pFile == NULL) {
-    return -1;
-  }
-  ASSERT(pFile->fp != NULL);
-  if (pFile->fp == NULL) {
-    return -1;
-  }
-
-  return feof(pFile->fp);
 }
 
 bool taosCheckAccessFile(const char *pathname, int32_t tdFileAccessOptions) {
