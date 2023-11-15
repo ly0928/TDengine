@@ -110,6 +110,7 @@ typedef struct SScanLogicNode {
   SArray*       pSmaIndexes;
   SNodeList*    pGroupTags;
   bool          groupSort;
+  SNodeList*    pLastFlags;
   SNodeList*    pTags;      // for create stream
   SNode*        pSubtable;  // for create stream
   int8_t        cacheLastMode;

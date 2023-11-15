@@ -2902,7 +2902,7 @@ static int32_t splitCacheLastFuncOptimize(SOptimizeContext* pCxt, SLogicSubplan*
     return TSDB_CODE_SUCCESS;
   }
 
-  SScanLogicNode* pScan = nodesListGetNode(pAgg->node.pChildren, 0);
+  SScanLogicNode* pScan = (SScanLogicNode*)nodesListGetNode(pAgg->node.pChildren, 0);
   SNode* pNode = NULL;
   SNodeList* pAggFuncList = NULL;
   {
