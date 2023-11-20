@@ -1382,8 +1382,10 @@ static EDealRes translateOperator(STranslateContext* pCxt, SOperatorNode* pOp) {
     return generateDealNodeErrMsg(pCxt, TSDB_CODE_PAR_WRONG_VALUE_TYPE, ((SExprNode*)(pOp->pRight))->aliasName);
   }
 
-  if (TSDB_CODE_SUCCESS != scalarGetOperatorResultType(pOp)) {
-    return generateDealNodeErrMsg(pCxt, TSDB_CODE_PAR_WRONG_VALUE_TYPE, pOp->node.aliasName);
+  int32_t res = scalarGetOperatorResultType(pOp);
+  pCxt->errCode = res;
+  if (TSDB_CODE_SUCCESS != res) {
+    // return generateDealNodeErrMsg(pCxt, TSDB_CODE_PAR_WRONG_VALUE_TYPE, pOp->node.aliasName);
   }
 
   return DEAL_RES_CONTINUE;

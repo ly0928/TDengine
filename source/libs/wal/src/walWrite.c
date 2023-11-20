@@ -221,6 +221,7 @@ int32_t walRollback(SWal *pWal, int64_t ver) {
 
 static FORCE_INLINE int32_t walCheckAndRoll(SWal *pWal) {
   if (taosArrayGetSize(pWal->fileInfoSet) == 0) {
+    wDebug("vgId:%d, wal write log %" PRId64 " 1", pWal->cfg.vgId);
     if (walRollImpl(pWal) < 0) {
       return -1;
     }
@@ -229,10 +230,12 @@ static FORCE_INLINE int32_t walCheckAndRoll(SWal *pWal) {
 
   int64_t passed = walGetSeq() - pWal->lastRollSeq;
   if (pWal->cfg.rollPeriod != -1 && pWal->cfg.rollPeriod != 0 && passed > pWal->cfg.rollPeriod) {
+    wDebug("vgId:%d, wal write log %" PRId64 " 2", pWal->cfg.vgId);
     if (walRollImpl(pWal) < 0) {
       return -1;
     }
   } else if (pWal->cfg.segSize != -1 && pWal->cfg.segSize != 0 && walGetLastFileSize(pWal) > pWal->cfg.segSize) {
+    wDebug("vgId:%d, wal write log %" PRId64 " 3", pWal->cfg.vgId);
     if (walRollImpl(pWal) < 0) {
       return -1;
     }
@@ -242,12 +245,14 @@ static FORCE_INLINE int32_t walCheckAndRoll(SWal *pWal) {
     if (walSaveMeta(pWal) < 0) {
       return -1;
     }
+    wDebug("vgId:%d, wal write log %" PRId64 " 4", pWal->cfg.vgId);
   }
 
   return 0;
 }
 
 int32_t walBeginSnapshot(SWal *pWal, int64_t ver, int64_t logRetention) {
+  wDebug("vgId:%d walBeginSnapshot start", pWal->cfg.vgId);
   taosThreadMutexLock(&pWal->mutex);
   ASSERT(logRetention >= 0);
   pWal->vers.verInSnapshotting = ver;
@@ -265,6 +270,7 @@ int32_t walBeginSnapshot(SWal *pWal, int64_t ver, int64_t logRetention) {
   }
 
   taosThreadMutexUnlock(&pWal->mutex);
+  wDebug("vgId:%d walBeginSnapshot end", pWal->cfg.vgId);
   return 0;
 
 _err:
@@ -274,6 +280,7 @@ _err:
 
 int32_t walEndSnapshot(SWal *pWal) {
   int32_t code = 0;
+  wDebug("vgId:%d walEndSnapshot start", pWal->cfg.vgId);
   taosThreadMutexLock(&pWal->mutex);
   int64_t ver = pWal->vers.verInSnapshotting;
 
@@ -381,12 +388,13 @@ int32_t walEndSnapshot(SWal *pWal) {
 
 END:
   taosThreadMutexUnlock(&pWal->mutex);
+  wDebug("vgId:%d walEndSnapshot end", pWal->cfg.vgId);
   return code;
 }
 
 int32_t walRollImpl(SWal *pWal) {
   int32_t code = 0;
-
+  wDebug("vgId:%d, walRollImpl write log %" PRId64 " 1", pWal->cfg.vgId);
   if (pWal->pIdxFile != NULL) {
     code = taosFsyncFile(pWal->pIdxFile);
     if (code != 0) {
@@ -445,13 +453,14 @@ int32_t walRollImpl(SWal *pWal) {
 
   pWal->lastRollSeq = walGetSeq();
 
+  wDebug("vgId:%d, walRollImpl write log %" PRId64 " 2", pWal->cfg.vgId);
   code = walSaveMeta(pWal);
   if (code < 0) {
     wError("vgId:%d, failed to save meta since %s", pWal->cfg.vgId, terrstr());
     goto END;
   }
-
 END:
+  wDebug("vgId:%d, walRollImpl write log %" PRId64 " 3", pWal->cfg.vgId);
   return code;
 }
 
@@ -563,12 +572,12 @@ int64_t walAppendLog(SWal *pWal, int64_t index, tmsg_t msgType, SWalSyncInfo syn
     taosThreadMutexUnlock(&pWal->mutex);
     return -1;
   }
-
+  wDebug("vgId:%d, wal write log mutes:%p 0", pWal->cfg.vgId, &pWal->mutex);
   if (walCheckAndRoll(pWal) < 0) {
     taosThreadMutexUnlock(&pWal->mutex);
     return -1;
   }
-
+  wDebug("vgId:%d, wal write log 10", pWal->cfg.vgId);
   if (pWal->pLogFile == NULL || pWal->pIdxFile == NULL || pWal->writeCur < 0) {
     if (walInitWriteFile(pWal) < 0) {
       taosThreadMutexUnlock(&pWal->mutex);
@@ -631,6 +640,7 @@ int32_t walWrite(SWal *pWal, int64_t index, tmsg_t msgType, const void *body, in
 }
 
 void walFsync(SWal *pWal, bool forceFsync) {
+  wTrace("vgId:%d, walFsync start.", pWal->cfg.vgId);
   taosThreadMutexLock(&pWal->mutex);
   if (forceFsync || (pWal->cfg.level == TAOS_WAL_FSYNC && pWal->cfg.fsyncPeriod == 0)) {
     wTrace("vgId:%d, fileId:%" PRId64 ".log, do fsync", pWal->cfg.vgId, walGetCurFileFirstVer(pWal));
@@ -640,4 +650,5 @@ void walFsync(SWal *pWal, bool forceFsync) {
     }
   }
   taosThreadMutexUnlock(&pWal->mutex);
+  wTrace("vgId:%d, walFsync end.", pWal->cfg.vgId);
 }

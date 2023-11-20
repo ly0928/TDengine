@@ -203,9 +203,11 @@ int32_t walAlter(SWal *pWal, SWalCfg *pCfg) {
 }
 
 int32_t walPersist(SWal *pWal) {
+  wInfo("vgId:%d, walPersist start", pWal->cfg.vgId);
   taosThreadMutexLock(&pWal->mutex);
   int32_t ret = walSaveMeta(pWal);
   taosThreadMutexUnlock(&pWal->mutex);
+  wInfo("vgId:%d, walPersist end", pWal->cfg.vgId);
   return ret;
 }
 

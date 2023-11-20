@@ -196,15 +196,18 @@ static int32_t raftLogAppendEntry(struct SSyncLogStore* pLogStore, SSyncRaftEntr
   SSyncLogStoreData* pData = pLogStore->data;
   SWal*              pWal = pData->pWal;
 
+  wDebug("vgId:%d, raftLogAppendEntry start", pWal->cfg.vgId);
   SyncIndex    index = 0;
   SWalSyncInfo syncMeta = {0};
   syncMeta.isWeek = pEntry->isWeak;
   syncMeta.seqNum = pEntry->seqNum;
   syncMeta.term = pEntry->term;
+  static int64_t all[12];
   int64_t tsWriteBegin = taosGetTimestampNs();
   index = walAppendLog(pWal, pEntry->index, pEntry->originalRpcType, syncMeta, pEntry->data, pEntry->dataLen);
   int64_t tsWriteEnd = taosGetTimestampNs();
   int64_t tsElapsed = tsWriteEnd - tsWriteBegin;
+  all[pData->pSyncNode->vgId] += tsElapsed;
 
   if (index < 0) {
     int32_t     err = terrno;
@@ -221,8 +224,10 @@ static int32_t raftLogAppendEntry(struct SSyncLogStore* pLogStore, SSyncRaftEntr
 
   walFsync(pWal, forceSync);
 
-  sNTrace(pData->pSyncNode, "write index:%" PRId64 ", type:%s, origin type:%s, elapsed:%" PRId64, pEntry->index,
-          TMSG_INFO(pEntry->msgType), TMSG_INFO(pEntry->originalRpcType), tsElapsed);
+  sNTrace(pData->pSyncNode, "write index:%" PRId64 ", type:%s, origin type:%s, all[%d]:%" PRId64 " elapsed:%" PRId64,
+          pEntry->index, TMSG_INFO(pEntry->msgType), TMSG_INFO(pEntry->originalRpcType), pData->pSyncNode->vgId,
+          all[pData->pSyncNode->vgId],
+          tsElapsed);
   return 0;
 }
 

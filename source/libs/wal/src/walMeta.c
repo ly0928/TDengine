@@ -850,19 +850,20 @@ int walSaveMeta(SWal* pWal) {
   char tmpFnameStr[WAL_FILE_LEN];
   int  n;
 
+  wDebug("vgId:%d, walSaveMeta 0", pWal->cfg.vgId);
   // fsync the idx and log file at first to ensure validity of meta
   if (taosFsyncFile(pWal->pIdxFile) < 0) {
     wError("vgId:%d, failed to sync idx file due to %s", pWal->cfg.vgId, strerror(errno));
     terrno = TAOS_SYSTEM_ERROR(errno);
     return -1;
   }
-
+  wDebug("vgId:%d, walSaveMeta 1", pWal->cfg.vgId);
   if (taosFsyncFile(pWal->pLogFile) < 0) {
     wError("vgId:%d, failed to sync log file due to %s", pWal->cfg.vgId, strerror(errno));
     terrno = TAOS_SYSTEM_ERROR(errno);
     return -1;
   }
-
+  wDebug("vgId:%d, walSaveMeta 2", pWal->cfg.vgId);
   // update synced offset
   (void)walUpdateSyncedOffset(pWal);
 
@@ -871,14 +872,14 @@ int walSaveMeta(SWal* pWal) {
   if (n >= sizeof(tmpFnameStr)) {
     return -1;
   }
-
-  TdFilePtr pMetaFile = taosOpenFile(tmpFnameStr, TD_FILE_CREATE | TD_FILE_WRITE | TD_FILE_TRUNC);
+  wDebug("vgId:%d, walSaveMeta 3", pWal->cfg.vgId);
+  TdFilePtr pMetaFile = taosOpenFile(tmpFnameStr, TD_FILE_CREATE | TD_FILE_WRITE | TD_FILE_TRUNC | TD_FILE_WRITE_THROUGH);
   if (pMetaFile == NULL) {
     wError("vgId:%d, failed to open file due to %s. file:%s", pWal->cfg.vgId, strerror(errno), tmpFnameStr);
     terrno = TAOS_SYSTEM_ERROR(errno);
     return -1;
   }
-
+  wDebug("vgId:%d, walSaveMeta 4", pWal->cfg.vgId);
   char* serialized = walMetaSerialize(pWal);
   int   len = strlen(serialized);
   if (len != taosWriteFile(pMetaFile, serialized, len)) {
@@ -886,7 +887,7 @@ int walSaveMeta(SWal* pWal) {
     terrno = TAOS_SYSTEM_ERROR(errno);
     goto _err;
   }
-
+  wDebug("vgId:%d, walSaveMeta 5", pWal->cfg.vgId);
   if (taosFsyncFile(pMetaFile) < 0) {
     wError("vgId:%d, failed to sync file due to %s. file:%s", pWal->cfg.vgId, strerror(errno), tmpFnameStr);
     terrno = TAOS_SYSTEM_ERROR(errno);
@@ -898,7 +899,7 @@ int walSaveMeta(SWal* pWal) {
     terrno = TAOS_SYSTEM_ERROR(errno);
     goto _err;
   }
-
+  wDebug("vgId:%d, walSaveMeta 6", pWal->cfg.vgId);
   // rename it
   n = walBuildMetaName(pWal, metaVer + 1, fnameStr);
   if (n >= sizeof(fnameStr)) {
@@ -910,7 +911,7 @@ int walSaveMeta(SWal* pWal) {
     terrno = TAOS_SYSTEM_ERROR(errno);
     goto _err;
   }
-
+  wDebug("vgId:%d, walSaveMeta 7", pWal->cfg.vgId);
   // delete old file
   if (metaVer > -1) {
     walBuildMetaName(pWal, metaVer, fnameStr);
